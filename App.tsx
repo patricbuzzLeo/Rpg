@@ -4,10 +4,6 @@ import { BRAWLERS, ENEMIES, BOXES, DUPLICATE_COIN_REWARD, UPGRADE_BASE_COST, UPG
 import { Brawler, GameState, LogEntry, BoxTier } from './types';
 import BrawlerCard from './components/BrawlerCard';
 import { generateBattleCommentary } from './services/geminiService';
-import { GoogleGenAI } from "@google/genai";
-
-// Ensure AI client is ready only when key is available to avoid errors if env is missing
-const apiKey = process.env.API_KEY || '';
 
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>({

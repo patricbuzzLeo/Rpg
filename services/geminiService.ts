@@ -1,7 +1,8 @@
 
 import { GoogleGenAI } from "@google/genai";
 
-const apiKey = process.env.API_KEY || '';
+// Safely access process.env to avoid ReferenceError in some environments
+const apiKey = (typeof process !== 'undefined' && process.env && process.env.API_KEY) ? process.env.API_KEY : '';
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const FALLBACK_COMMENTARY = [
@@ -42,7 +43,14 @@ export const generateBattleCommentary = async (
       contents: prompt,
     });
 
-    return response.text.trim();
+    // Safely access text, handling potential undefined if filtered
+    const text = response.text ? response.text.trim() : null;
+    
+    if (!text) {
+        throw new Error("Empty response from AI");
+    }
+
+    return text;
   } catch (error: any) {
     // Gracefully handle Quota Exceeded (429) or other API errors
     const isQuotaError = 
