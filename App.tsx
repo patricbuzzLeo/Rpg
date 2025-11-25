@@ -1,0 +1,964 @@
+
+import React, { useState, useEffect, useRef } from 'react';
+import { BRAWLERS, ENEMIES, BOXES, DUPLICATE_COIN_REWARD, UPGRADE_BASE_COST, UPGRADE_COST_PER_LEVEL, HP_PER_UPGRADE, ATTACK_PER_UPGRADE, POTION_COST, POTION_HEAL_AMOUNT } from './constants';
+import { Brawler, GameState, LogEntry, BoxTier } from './types';
+import BrawlerCard from './components/BrawlerCard';
+import { generateBattleCommentary } from './services/geminiService';
+import { GoogleGenAI } from "@google/genai";
+
+// Ensure AI client is ready only when key is available to avoid errors if env is missing
+const apiKey = process.env.API_KEY || '';
+
+const App: React.FC = () => {
+  const [gameState, setGameState] = useState<GameState>({
+    status: 'MENU',
+    player: null,
+    enemy: null,
+    turn: 'PLAYER',
+    log: [],
+    commentary: "브롤 스타즈 RPG에 오신 것을 환영합니다! 캐릭터를 선택하세요!",
+    wins: 0,
+    coins: 500, // Start with some coins to try the box
+    lastReward: 0,
+    unlockedBrawlerIds: ['shelly'], // Shelly starts unlocked
+    brawlerUpgrades: {}, // Initialize empty
+    potions: 3 // Start with 3 free potions
+  });
+
+  const [selectedBrawlerId, setSelectedBrawlerId] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [damageEffect, setDamageEffect] = useState<'player' | 'enemy' | null>(null);
+  
+  // For box opening animation
+  const [boxState, setBoxState] = useState<'IDLE' | 'SHAKING' | 'OPENING' | 'REVEALED'>('IDLE');
+  const [activeBox, setActiveBox] = useState<BoxTier | null>(null);
+  const [boxReward, setBoxReward] = useState<{ type: 'NEW_BRAWLER' | 'DUPLICATE' | 'COINS', item: Brawler | null, coins: number } | null>(null);
+
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [gameState.log]);
+
+  const addLog = (text: string, type: LogEntry['type'] = 'info') => {
+    setGameState(prev => ({
+      ...prev,
+      log: [...prev.log, { id: Date.now(), text, type }]
+    }));
+  };
+
+  const updateCommentary = async (action: string, actor: string, target: string, result: string) => {
+    // Always call generateBattleCommentary. The service handles missing keys or API errors by returning a fallback string.
+    const comment = await generateBattleCommentary(action, actor, target, result);
+    setGameState(prev => ({ ...prev, commentary: comment }));
+  };
+
+  const buyBrawler = (brawler: Brawler) => {
+    if (gameState.coins >= brawler.price) {
+      setGameState(prev => ({
+        ...prev,
+        coins: prev.coins - brawler.price,
+        unlockedBrawlerIds: [...prev.unlockedBrawlerIds, brawler.id]
+      }));
+    }
+  };
+
+  const buyPotion = () => {
+      if (gameState.coins >= POTION_COST) {
+          setGameState(prev => ({
+              ...prev,
+              coins: prev.coins - POTION_COST,
+              potions: prev.potions + 1
+          }));
+      }
+  };
+
+  const upgradeBrawler = (brawlerId: string) => {
+    const currentUpgrade = gameState.brawlerUpgrades[brawlerId] || { level: 1, extraHp: 0, extraAttack: 0 };
+    const cost = UPGRADE_BASE_COST + (currentUpgrade.level * UPGRADE_COST_PER_LEVEL);
+
+    if (gameState.coins >= cost) {
+        setGameState(prev => ({
+            ...prev,
+            coins: prev.coins - cost,
+            brawlerUpgrades: {
+                ...prev.brawlerUpgrades,
+                [brawlerId]: {
+                    level: currentUpgrade.level + 1,
+                    extraHp: currentUpgrade.extraHp + HP_PER_UPGRADE,
+                    extraAttack: currentUpgrade.extraAttack + ATTACK_PER_UPGRADE
+                }
+            }
+        }));
+    }
+  };
+
+  const openBox = (box: BoxTier) => {
+    if (gameState.coins < box.cost) return;
+
+    setActiveBox(box);
+    setGameState(prev => ({ ...prev, coins: prev.coins - box.cost }));
+    setBoxState('SHAKING');
+
+    setTimeout(() => {
+        setBoxState('OPENING');
+        setTimeout(() => {
+             // Logic to pick reward
+             const isBrawlerDrop = Math.random() < box.brawlerChance;
+
+             if (isBrawlerDrop) {
+                const randomBrawler = BRAWLERS[Math.floor(Math.random() * BRAWLERS.length)];
+                const isOwned = gameState.unlockedBrawlerIds.includes(randomBrawler.id);
+
+                if (!isOwned) {
+                    setBoxReward({ type: 'NEW_BRAWLER', item: randomBrawler, coins: 0 });
+                    setGameState(prev => ({
+                        ...prev,
+                        unlockedBrawlerIds: [...prev.unlockedBrawlerIds, randomBrawler.id]
+                    }));
+                } else {
+                    setBoxReward({ type: 'DUPLICATE', item: randomBrawler, coins: DUPLICATE_COIN_REWARD });
+                    setGameState(prev => ({
+                        ...prev,
+                        coins: prev.coins + DUPLICATE_COIN_REWARD
+                    }));
+                }
+             } else {
+                 // Coin Drop
+                 const coinAmount = Math.floor(Math.random() * (box.maxCoins - box.minCoins + 1)) + box.minCoins;
+                 setBoxReward({ type: 'COINS', item: null, coins: coinAmount });
+                 setGameState(prev => ({
+                     ...prev,
+                     coins: prev.coins + coinAmount
+                 }));
+             }
+            setBoxState('REVEALED');
+        }, 1000);
+    }, 1000);
+  };
+
+  const closeBoxReveal = () => {
+      setBoxState('IDLE');
+      setBoxReward(null);
+      setActiveBox(null);
+  };
+
+  const selectBrawler = (brawler: Brawler) => {
+    if (selectedBrawlerId === brawler.id) {
+      setSelectedBrawlerId(null);
+    } else {
+      setSelectedBrawlerId(brawler.id);
+    }
+  };
+
+  const startGame = () => {
+    const baseBrawler = BRAWLERS.find(b => b.id === selectedBrawlerId);
+    if (!baseBrawler) return;
+
+    // Apply Upgrades
+    const upgrades = gameState.brawlerUpgrades[baseBrawler.id] || { level: 1, extraHp: 0, extraAttack: 0 };
+    const playerBrawler: Brawler = {
+        ...baseBrawler,
+        hp: baseBrawler.hp + upgrades.extraHp,
+        maxHp: baseBrawler.maxHp + upgrades.extraHp,
+        attack: baseBrawler.attack + upgrades.extraAttack
+    };
+
+    setGameState(prev => ({
+      ...prev,
+      status: 'BATTLE',
+      player: playerBrawler,
+      enemy: { ...ENEMIES[0] }, // Start with first enemy
+      turn: 'PLAYER',
+      log: [{ id: Date.now(), text: '전투가 시작되었습니다!', type: 'info' }],
+      commentary: `${playerBrawler.name} (Lv.${upgrades.level}) 출격! 전투 준비 완료!`,
+      wins: 0,
+      lastReward: 0
+    }));
+  };
+
+  const goToMenu = () => {
+    setGameState(prev => ({
+      ...prev,
+      status: 'MENU',
+      player: null,
+      enemy: null
+    }));
+    setSelectedBrawlerId(null);
+  };
+
+  const goToCharacterSelect = () => {
+    setGameState(prev => ({
+      ...prev,
+      status: 'SELECT_CHARACTER'
+    }));
+  };
+
+  const goToShop = () => {
+    setGameState(prev => ({
+        ...prev,
+        status: 'SHOP'
+    }));
+  };
+
+  const goToBlacksmith = () => {
+    setGameState(prev => ({
+        ...prev,
+        status: 'BLACKSMITH'
+    }));
+  };
+
+  const nextLevel = () => {
+    if (!gameState.player) return;
+    
+    // Heal player 50% on next level
+    const newPlayerHp = Math.min(gameState.player.maxHp, gameState.player.hp + Math.floor(gameState.player.maxHp * 0.5));
+    
+    // Pick random enemy or next in line
+    const nextEnemyIndex = (gameState.wins + 1) % ENEMIES.length;
+    // Scale enemy stats based on wins
+    const baseEnemy = ENEMIES[nextEnemyIndex];
+    const scaledEnemy = {
+        ...baseEnemy,
+        maxHp: Math.floor(baseEnemy.maxHp * (1 + gameState.wins * 0.2)),
+        hp: Math.floor(baseEnemy.maxHp * (1 + gameState.wins * 0.2)),
+        attack: Math.floor(baseEnemy.attack * (1 + gameState.wins * 0.1)),
+    };
+
+    setGameState(prev => ({
+      ...prev,
+      status: 'BATTLE',
+      player: { ...prev.player!, hp: newPlayerHp },
+      enemy: scaledEnemy,
+      turn: 'PLAYER',
+      log: [...prev.log, { id: Date.now(), text: `다음 라운드! ${scaledEnemy.name} 등장!`, type: 'info' }],
+      commentary: "새로운 도전자가 나타났습니다! 준비하세요!",
+      wins: prev.wins + 1,
+      lastReward: 0
+    }));
+  };
+
+  const checkWinCondition = (currentPlayer: Brawler, currentEnemy: Brawler) => {
+    if (currentEnemy.hp <= 0) {
+      const reward = 100 + (gameState.wins * 50); // Base 100 + 50 per win streak
+      
+      setTimeout(() => {
+        setGameState(prev => ({ 
+            ...prev, 
+            status: 'VICTORY',
+            coins: prev.coins + reward,
+            lastReward: reward
+        }));
+        addLog(`${currentEnemy.name} 처치 완료! 승리! (+${reward} 코인)`, 'info');
+      }, 1000);
+      return true;
+    }
+    if (currentPlayer.hp <= 0) {
+      setTimeout(() => {
+        setGameState(prev => ({ ...prev, status: 'DEFEAT' }));
+        addLog(`${currentPlayer.name} 쓰러짐... 패배.`, 'info');
+      }, 1000);
+      return true;
+    }
+    return false;
+  };
+
+  const handlePlayerAction = async (actionType: 'ATTACK' | 'SUPER' | 'POTION') => {
+    if (gameState.turn !== 'PLAYER' || isProcessing || !gameState.player || !gameState.enemy) return;
+
+    setIsProcessing(true);
+    const player = { ...gameState.player };
+    let enemy = { ...gameState.enemy };
+    
+    let damage = 0;
+    let logText = '';
+    let actionName = '';
+
+    if (actionType === 'POTION') {
+        if (gameState.potions <= 0) {
+            setIsProcessing(false);
+            return;
+        }
+        
+        // Consume potion
+        const healAmount = Math.min(POTION_HEAL_AMOUNT, player.maxHp - player.hp);
+        player.hp += healAmount;
+        
+        setGameState(prev => ({
+            ...prev,
+            potions: prev.potions - 1
+        }));
+        
+        actionName = '회복 물약';
+        logText = `${player.name}가 물약을 사용하여 ${healAmount} 체력을 회복했습니다!`;
+        addLog(logText, 'heal');
+        
+        // Slightly delay enemy turn
+        setGameState(prev => ({
+            ...prev,
+            player,
+            turn: 'ENEMY'
+        }));
+        
+        updateCommentary('회복', player.name, '자신', `${healAmount} 회복`);
+        
+        setTimeout(() => handleEnemyTurn(player, enemy), 1500);
+        return;
+    }
+
+    if (actionType === 'ATTACK') {
+        damage = player.attack;
+        actionName = '일반 공격';
+        logText = `${player.name}의 공격! ${damage} 피해를 입혔습니다.`;
+        
+        // Charge super
+        player.superCharge = Math.min(100, player.superCharge + player.superChargeRate);
+    } else {
+        // Super
+        actionName = player.superName;
+        if (player.superDamage < 0) {
+            // Healing Super
+            const healAmount = Math.abs(player.superDamage);
+            player.hp = Math.min(player.maxHp, player.hp + healAmount);
+            logText = `${player.name}의 궁극기! ${healAmount} 체력을 회복했습니다.`;
+            damage = 0;
+        } else {
+            damage = player.superDamage;
+            logText = `${player.name}의 궁극기 발동! ${enemy.name}에게 ${damage}의 치명적인 피해!`;
+        }
+        player.superCharge = 0; // Reset charge
+    }
+
+    // Apply damage to enemy
+    if (damage > 0) {
+        enemy.hp = Math.max(0, enemy.hp - damage);
+        setDamageEffect('enemy');
+        setTimeout(() => setDamageEffect(null), 500);
+    }
+
+    addLog(logText, actionType === 'SUPER' ? 'super' : 'damage');
+    
+    // Update State immediately for UI feedback
+    setGameState(prev => ({
+        ...prev,
+        player,
+        enemy,
+        turn: 'ENEMY' // Pass turn tentatively, will verify win condition first
+    }));
+
+    // Generate Commentary without blocking too much
+    updateCommentary(actionName, player.name, damage > 0 ? enemy.name : '자신', `${damage > 0 ? damage + ' 데미지' : '회복'}`);
+
+    if (checkWinCondition(player, enemy)) {
+        setIsProcessing(false);
+        return;
+    }
+
+    // Enemy Turn Delay
+    setTimeout(() => handleEnemyTurn(player, enemy), 1500);
+  };
+
+  const handleEnemyTurn = async (currentPlayer: Brawler, currentEnemy: Brawler) => {
+    // Re-check win condition just in case
+    if (currentEnemy.hp <= 0 || currentPlayer.hp <= 0) {
+        setIsProcessing(false);
+        return;
+    }
+
+    let enemy = { ...currentEnemy };
+    let player = { ...currentPlayer };
+
+    // Simple AI: Use Super if ready, otherwise Attack
+    const useSuper = enemy.superCharge >= 100;
+    let damage = 0;
+    let actionName = '';
+
+    if (useSuper) {
+        damage = enemy.superDamage;
+        actionName = enemy.superName;
+        enemy.superCharge = 0;
+        addLog(`${enemy.name}의 ${enemy.superName}! 강력한 공격!`, 'super');
+    } else {
+        damage = enemy.attack;
+        actionName = '공격';
+        enemy.superCharge = Math.min(100, enemy.superCharge + enemy.superChargeRate);
+        addLog(`${enemy.name}이 공격합니다. ${damage} 피해를 입음.`, 'damage');
+    }
+
+    player.hp = Math.max(0, player.hp - damage);
+    setDamageEffect('player');
+    setTimeout(() => setDamageEffect(null), 500);
+
+    setGameState(prev => ({
+        ...prev,
+        player,
+        enemy,
+        turn: 'PLAYER'
+    }));
+
+    // updateCommentary(actionName, enemy.name, player.name, `${damage} 데미지`); // Optional: Comment on enemy moves too
+    
+    if (!checkWinCondition(player, enemy)) {
+        setIsProcessing(false);
+    } else {
+        setIsProcessing(false);
+    }
+  };
+
+  // --- Renders ---
+
+  const renderCoinDisplay = () => (
+      <div className="absolute top-4 right-4 bg-black/50 backdrop-blur-md border border-yellow-500/30 px-6 py-2 rounded-full flex items-center gap-2 shadow-xl z-50">
+         <div className="w-6 h-6 rounded-full bg-yellow-400 border-2 border-yellow-200 flex items-center justify-center shadow-inner text-yellow-800 font-black text-xs">$</div>
+         <span className="text-yellow-400 font-black text-xl tracking-wider">{gameState.coins.toLocaleString()}</span>
+      </div>
+  );
+
+  const renderMenu = () => (
+    <div className="flex flex-col items-center justify-center min-h-screen p-4 bg-gradient-to-b from-blue-900 to-slate-900 relative overflow-hidden">
+      {/* Background Elements */}
+      <div className="absolute inset-0 bg-[url('https://picsum.photos/seed/brawlbg/1920/1080')] bg-cover bg-center opacity-30"></div>
+      
+      {renderCoinDisplay()}
+
+      <div className="relative z-10 text-center mb-12 animate-float">
+        <h1 className="text-7xl md:text-9xl font-black text-yellow-400 text-outline mb-4 font-sans tracking-tighter drop-shadow-[0_5px_5px_rgba(0,0,0,0.5)]">
+          BRAWL RPG
+        </h1>
+        <p className="text-2xl text-cyan-300 font-bold text-outline">브롤스타즈 RPG 배틀</p>
+      </div>
+
+      <div className="flex flex-col gap-4 relative z-10 w-full max-w-md">
+        <button 
+            onClick={goToCharacterSelect}
+            className="group bg-yellow-500 hover:bg-yellow-400 text-black font-black text-3xl py-6 px-16 rounded-2xl shadow-[0_6px_0_rgb(161,98,7)] active:shadow-none active:translate-y-2 transition-all duration-150 transform hover:scale-105"
+        >
+            BRAWLERS
+        </button>
+         <button 
+            onClick={goToBlacksmith}
+            className="group bg-orange-700 hover:bg-orange-600 text-white font-black text-2xl py-4 px-16 rounded-2xl shadow-[0_6px_0_rgb(124,45,18)] active:shadow-none active:translate-y-2 transition-all duration-150 transform hover:scale-105 flex items-center justify-center gap-3"
+        >
+            <span>⚒️</span> BLACKSMITH
+        </button>
+        <button 
+            onClick={goToShop}
+            className="group bg-purple-600 hover:bg-purple-500 text-white font-black text-2xl py-4 px-16 rounded-2xl shadow-[0_6px_0_rgb(88,28,135)] active:shadow-none active:translate-y-2 transition-all duration-150 transform hover:scale-105 flex items-center justify-center gap-3"
+        >
+            <span className="text-3xl">📦</span> SHOP
+        </button>
+      </div>
+
+      <div className="absolute bottom-8 text-slate-500 font-bold text-sm">
+        Powered by Gemini AI
+      </div>
+    </div>
+  );
+
+  const renderBlacksmith = () => (
+      <div className="flex flex-col items-center min-h-screen bg-slate-900 relative pb-10">
+         {renderCoinDisplay()}
+         
+         {/* Background */}
+         <div className="absolute inset-0 bg-orange-950/80 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
+         
+         {/* Header */}
+         <div className="w-full max-w-6xl p-4 flex items-center justify-between sticky top-0 bg-slate-900/95 backdrop-blur z-30 border-b border-orange-800 mb-6">
+            <button 
+                onClick={goToMenu} 
+                className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-bold text-white shadow-md transition-colors border border-gray-600"
+            >
+                ← Back
+            </button>
+            <h2 className="text-3xl font-black text-orange-500 text-center flex-1 text-outline tracking-wider flex items-center justify-center gap-2">
+                ⚒️ BLACKSMITH
+            </h2>
+            <div className="w-20"></div>
+         </div>
+
+         <div className="max-w-4xl w-full grid gap-4 px-4 z-10">
+             {BRAWLERS.filter(b => gameState.unlockedBrawlerIds.includes(b.id)).map(brawler => {
+                 const upgrade = gameState.brawlerUpgrades[brawler.id] || { level: 1, extraHp: 0, extraAttack: 0 };
+                 const cost = UPGRADE_BASE_COST + (upgrade.level * UPGRADE_COST_PER_LEVEL);
+                 const canAfford = gameState.coins >= cost;
+
+                 return (
+                     <div key={brawler.id} className="bg-slate-800 rounded-xl p-4 border border-gray-700 flex flex-col md:flex-row items-center gap-4 shadow-lg">
+                         {/* Avatar */}
+                         <div className="relative">
+                            <div className="w-20 h-20 rounded-lg overflow-hidden border-2 border-gray-500">
+                                <img src={brawler.avatarUrl} alt={brawler.name} className="w-full h-full object-cover" />
+                            </div>
+                            <div className="absolute -bottom-2 -right-2 bg-orange-600 text-white text-xs font-bold px-2 py-1 rounded border border-white">
+                                Lv.{upgrade.level}
+                            </div>
+                         </div>
+
+                         {/* Info */}
+                         <div className="flex-1 text-center md:text-left">
+                             <h3 className="text-xl font-bold text-white">{brawler.name}</h3>
+                             <div className="flex items-center justify-center md:justify-start gap-4 mt-1 text-sm">
+                                 <div className="text-gray-400">
+                                     HP: <span className="text-white font-bold">{brawler.maxHp}</span> 
+                                     <span className="text-green-400"> +{upgrade.extraHp}</span>
+                                 </div>
+                                 <div className="text-gray-400">
+                                     ATK: <span className="text-white font-bold">{brawler.attack}</span>
+                                     <span className="text-red-400"> +{upgrade.extraAttack}</span>
+                                 </div>
+                             </div>
+                         </div>
+
+                         {/* Upgrade Action */}
+                         <button 
+                            onClick={() => upgradeBrawler(brawler.id)}
+                            disabled={!canAfford}
+                            className={`
+                                flex flex-col items-center px-6 py-2 rounded-lg font-bold transition-all
+                                ${canAfford ? 'bg-orange-600 hover:bg-orange-500 hover:scale-105 shadow-[0_0_15px_rgba(234,88,12,0.4)]' : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+                            `}
+                         >
+                             <span className="text-xs uppercase opacity-80">Upgrade</span>
+                             <div className="flex items-center gap-1">
+                                 <span className="text-yellow-400">$</span>
+                                 <span className="text-lg">{cost}</span>
+                             </div>
+                         </button>
+                     </div>
+                 );
+             })}
+         </div>
+      </div>
+  );
+
+  const renderShop = () => (
+      <div className="flex flex-col items-center min-h-screen bg-slate-900 relative overflow-hidden pb-10">
+        {renderCoinDisplay()}
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-purple-900 via-slate-900 to-black opacity-80"></div>
+
+         <div className="relative z-10 w-full max-w-6xl mb-8 flex items-center justify-between px-4 absolute top-4">
+             <button 
+                onClick={goToMenu} 
+                className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-bold text-white shadow-md transition-colors border border-gray-600"
+             >
+                ← Back
+             </button>
+          </div>
+
+          <div className="relative z-10 flex flex-col items-center mt-20 w-full">
+              <h2 className="text-4xl font-black text-white text-outline mb-10">BRAWL SHOP</h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-6xl w-full px-4 mb-16">
+                  {BOXES.map(box => (
+                       <div key={box.id} className="flex flex-col items-center group">
+                            <div className="relative">
+                                {/* Box visual */}
+                                <div 
+                                    className={`
+                                        w-56 h-56 ${box.color} rounded-3xl border-8 border-white/20 shadow-2xl
+                                        flex items-center justify-center text-8xl cursor-pointer transition-transform duration-200
+                                        ${boxState === 'SHAKING' && activeBox?.id === box.id ? 'animate-shake' : ''}
+                                        ${boxState === 'IDLE' ? 'hover:scale-105' : ''}
+                                        ${boxState !== 'IDLE' && activeBox?.id !== box.id ? 'opacity-30 scale-90 blur-sm' : ''}
+                                    `}
+                                    onClick={boxState === 'IDLE' ? () => openBox(box) : undefined}
+                                >
+                                    {boxState === 'REVEALED' && activeBox?.id === box.id ? '✨' : box.icon}
+                                </div>
+                                
+                                {/* Chances Badge */}
+                                <div className="absolute -top-3 -right-3 bg-black/80 text-white text-xs px-2 py-1 rounded-full border border-white/20">
+                                    {(box.brawlerChance * 100)}% Brawler
+                                </div>
+                            </div>
+
+                            <div className="mt-6 text-center">
+                                <h3 className="text-2xl font-bold text-white mb-2">{box.name}</h3>
+                                <div className="text-gray-400 text-sm mb-4">
+                                    Coins: {box.minCoins}-{box.maxCoins}
+                                </div>
+                                <button 
+                                    onClick={() => openBox(box)}
+                                    disabled={gameState.coins < box.cost || boxState !== 'IDLE'}
+                                    className={`
+                                        px-8 py-3 rounded-full font-black text-lg flex items-center justify-center gap-2 shadow-lg transition-all w-full
+                                        ${gameState.coins >= box.cost && boxState === 'IDLE'
+                                            ? 'bg-yellow-500 hover:bg-yellow-400 text-black hover:scale-105 active:scale-95' 
+                                            : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+                                    `}
+                                >
+                                    <span className="text-yellow-900">$</span>
+                                    <span>{box.cost}</span>
+                                </button>
+                            </div>
+                       </div>
+                  ))}
+              </div>
+
+              {/* Support Items Section */}
+              <div className="w-full max-w-4xl px-4">
+                  <h3 className="text-2xl font-black text-white text-outline mb-6 border-b border-gray-700 pb-2">SUPPORT ITEMS</h3>
+                  <div className="bg-slate-800 rounded-xl p-6 border border-gray-700 flex items-center justify-between shadow-lg">
+                       <div className="flex items-center gap-4">
+                           <div className="w-16 h-16 bg-green-900 rounded-lg flex items-center justify-center text-4xl border-2 border-green-500">
+                               🧪
+                           </div>
+                           <div>
+                               <h4 className="text-xl font-bold text-green-400">Healing Potion</h4>
+                               <p className="text-gray-400 text-sm">Heals <span className="text-white font-bold">{POTION_HEAL_AMOUNT} HP</span> in battle.</p>
+                               <p className="text-sm mt-1">Owned: <span className="text-yellow-400 font-bold">{gameState.potions}</span></p>
+                           </div>
+                       </div>
+                       <button 
+                            onClick={buyPotion}
+                            disabled={gameState.coins < POTION_COST}
+                            className={`
+                                px-6 py-3 rounded-xl font-bold text-lg flex items-center gap-2 transition-all
+                                ${gameState.coins >= POTION_COST 
+                                    ? 'bg-green-600 hover:bg-green-500 text-white hover:scale-105 shadow-[0_0_15px_rgba(22,163,74,0.4)]' 
+                                    : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+                            `}
+                        >
+                            <span className="text-yellow-400">$</span>
+                            {POTION_COST}
+                        </button>
+                  </div>
+              </div>
+
+              {boxState === 'REVEALED' && boxReward && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md animate-in fade-in duration-300">
+                      <div className="bg-slate-800 p-8 rounded-2xl border-4 border-yellow-500 max-w-sm w-full text-center relative overflow-hidden">
+                          <div className="absolute top-0 inset-x-0 h-32 bg-gradient-to-b from-yellow-500/20 to-transparent pointer-events-none"></div>
+                          
+                          <h3 className="text-3xl font-black text-white text-outline mb-6 relative z-10">
+                              {boxReward.type === 'NEW_BRAWLER' ? 'NEW BRAWLER!' : boxReward.type === 'DUPLICATE' ? 'DUPLICATE!' : 'COINS!'}
+                          </h3>
+                          
+                          {boxReward.type === 'COINS' ? (
+                               <div className="flex justify-center mb-6 py-8">
+                                   <div className="text-8xl animate-bounce">💰</div>
+                               </div>
+                          ) : (
+                              boxReward.item && (
+                                <div className="flex justify-center mb-6">
+                                    <div className="w-32 h-32 rounded-full border-4 border-white overflow-hidden shadow-2xl">
+                                        <img src={boxReward.item.avatarUrl} alt={boxReward.item.name} className="w-full h-full object-cover" />
+                                    </div>
+                                </div>
+                              )
+                          )}
+
+                          {boxReward.item && (
+                              <>
+                                <div className="text-xl font-bold text-white mb-2">{boxReward.item?.name}</div>
+                                <div className="text-purple-300 font-bold text-sm uppercase mb-6">{boxReward.item?.class}</div>
+                              </>
+                          )}
+
+                          {(boxReward.type === 'DUPLICATE' || boxReward.type === 'COINS') && (
+                              <div className="bg-gray-700/50 p-4 rounded-xl mb-6">
+                                  <p className="text-gray-300 text-sm mb-2">{boxReward.type === 'DUPLICATE' ? 'Converted to Coins' : 'Found in box'}</p>
+                                  <div className="flex justify-center items-center gap-2 text-yellow-400 font-black text-4xl">
+                                      <span>+ {boxReward.coins}</span>
+                                      <span className="text-lg bg-yellow-500 text-black px-2 rounded-full">$</span>
+                                  </div>
+                              </div>
+                          )}
+
+                          <button 
+                            onClick={closeBoxReveal}
+                            className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-lg transition-transform hover:scale-105"
+                          >
+                              COLLECT
+                          </button>
+                      </div>
+                  </div>
+              )}
+          </div>
+      </div>
+  );
+
+  const renderCharacterSelect = () => (
+    <div className="flex flex-col items-center min-h-screen bg-slate-900 relative pb-32">
+       {renderCoinDisplay()}
+
+      <div className="w-full max-w-6xl p-4 flex items-center justify-between sticky top-0 bg-slate-900/95 backdrop-blur z-30 border-b border-gray-800 mb-6">
+         <button 
+            onClick={goToMenu} 
+            className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-bold text-white shadow-md transition-colors border border-gray-600"
+         >
+            ← Back
+         </button>
+         <h2 className="text-2xl md:text-3xl font-bold text-white text-center flex-1">SELECT BRAWLER</h2>
+         <div className="w-20"></div> {/* Spacer for centering */}
+      </div>
+
+      <div className="max-w-6xl w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 px-4">
+          {BRAWLERS.map(brawler => {
+             const isLocked = !gameState.unlockedBrawlerIds.includes(brawler.id);
+             const canBuy = gameState.coins >= brawler.price;
+             const isSelected = selectedBrawlerId === brawler.id;
+             const upgrade = gameState.brawlerUpgrades[brawler.id];
+             
+             // Create a display brawler that includes upgrades for the card view
+             const displayBrawler = upgrade ? {
+                 ...brawler,
+                 hp: brawler.hp + upgrade.extraHp,
+                 maxHp: brawler.maxHp + upgrade.extraHp,
+                 attack: brawler.attack + upgrade.extraAttack
+             } : brawler;
+
+             return (
+                <div key={brawler.id} className="relative">
+                    <BrawlerCard 
+                        brawler={displayBrawler} 
+                        isLocked={isLocked}
+                        isSelected={isSelected}
+                        canBuy={canBuy}
+                        onBuy={(e) => {
+                            e.stopPropagation();
+                            buyBrawler(brawler);
+                        }}
+                        onClick={() => selectBrawler(brawler)}
+                    />
+                    {upgrade && !isLocked && (
+                        <div className="absolute top-2 right-2 z-20 bg-orange-600 text-white text-xs font-bold px-2 py-0.5 rounded shadow">
+                            Lv.{upgrade.level}
+                        </div>
+                    )}
+                </div>
+             );
+          })}
+        </div>
+
+        {/* Floating Start Button Footer */}
+        {selectedBrawlerId && (
+            <div className="fixed bottom-0 inset-x-0 bg-slate-800/90 backdrop-blur-md border-t border-yellow-500/50 p-6 z-40 flex justify-center animate-in slide-in-from-bottom duration-300">
+                <button
+                    onClick={startGame}
+                    className="bg-yellow-500 hover:bg-yellow-400 text-black font-black text-3xl py-4 px-20 rounded-2xl shadow-[0_0_30px_rgba(234,179,8,0.5)] hover:shadow-[0_0_50px_rgba(234,179,8,0.8)] transform hover:scale-105 transition-all flex flex-col items-center"
+                >
+                    BATTLE START
+                    <span className="text-sm font-bold opacity-70">
+                        with {BRAWLERS.find(b => b.id === selectedBrawlerId)?.name}
+                    </span>
+                </button>
+            </div>
+        )}
+    </div>
+  );
+
+  const renderBattle = () => {
+    if (!gameState.player || !gameState.enemy) return null;
+
+    return (
+      <div className="flex flex-col h-screen bg-slate-900 overflow-hidden">
+        {/* Header / Commentary */}
+        <div className="bg-slate-800 p-4 shadow-lg z-20 border-b border-slate-700 relative">
+          
+          {/* Home Button */}
+          <button 
+            onClick={goToMenu}
+            className="absolute left-4 top-1/2 -translate-y-1/2 p-2 bg-gray-700 hover:bg-gray-600 rounded-lg border border-gray-500 transition-colors"
+            title="메인 메뉴로 나가기"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+            </svg>
+          </button>
+
+          {/* Coins in Battle */}
+           <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-2 bg-black/40 px-3 py-1 rounded-full border border-yellow-500/20">
+             <div className="w-4 h-4 rounded-full bg-yellow-400 flex items-center justify-center text-[10px] text-yellow-900 font-bold">$</div>
+             <span className="text-yellow-400 font-bold">{gameState.coins.toLocaleString()}</span>
+           </div>
+
+          <div className="max-w-3xl mx-auto text-center pt-1 md:pt-0">
+             <div className="inline-block px-4 py-1 rounded-full bg-yellow-500 text-black font-bold text-xs mb-2">
+               BATTLE LOG
+             </div>
+             <p className="text-lg md:text-xl font-bold text-white animate-pulse truncate px-10">
+               "{gameState.commentary}"
+             </p>
+          </div>
+        </div>
+
+        {/* Battle Arena */}
+        <div className="flex-1 flex flex-col items-center justify-center p-4 relative bg-[url('https://picsum.photos/seed/brawlbg/1920/1080')] bg-cover bg-center">
+            {/* Overlay for readability */}
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
+
+            <div className="relative z-10 w-full max-w-5xl grid grid-cols-2 gap-8 md:gap-16 items-center">
+                {/* Player Side */}
+                <div className="flex flex-col items-center">
+                    <div className="mb-4">
+                        <span className="bg-blue-600 text-white px-3 py-1 rounded font-bold text-sm">YOU</span>
+                    </div>
+                    <BrawlerCard 
+                        brawler={gameState.player} 
+                        isPlayer={true} 
+                        showHealthBar={true} 
+                        isActive={gameState.turn === 'PLAYER'}
+                        isDamaged={damageEffect === 'player'}
+                    />
+                </div>
+
+                {/* VS Graphic */}
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none hidden md:block">
+                     <span className="text-6xl font-black text-white italic text-outline drop-shadow-[0_0_15px_rgba(255,0,0,0.8)]">VS</span>
+                </div>
+
+                {/* Enemy Side */}
+                <div className="flex flex-col items-center">
+                    <div className="mb-4">
+                        <span className="bg-red-600 text-white px-3 py-1 rounded font-bold text-sm">ENEMY</span>
+                    </div>
+                    <BrawlerCard 
+                        brawler={gameState.enemy} 
+                        isPlayer={false} 
+                        showHealthBar={true} 
+                        isActive={gameState.turn === 'ENEMY'}
+                        isDamaged={damageEffect === 'enemy'}
+                    />
+                </div>
+            </div>
+        </div>
+
+        {/* Controls & Log */}
+        <div className="bg-slate-800 p-4 border-t border-slate-700 h-1/3 flex flex-col md:flex-row gap-4 max-w-6xl mx-auto w-full">
+             {/* Action Buttons */}
+             <div className="flex-1 flex flex-col justify-center gap-3">
+                 <div className="flex gap-2">
+                    <button 
+                        disabled={gameState.turn !== 'PLAYER' || isProcessing}
+                        onClick={() => handlePlayerAction('ATTACK')}
+                        className={`
+                            flex-1 py-4 px-2 rounded-xl font-black text-lg tracking-wider shadow-[0_4px_0_rgb(0,0,0,0.3)] active:shadow-none active:translate-y-1 transition-all
+                            ${gameState.turn === 'PLAYER' && !isProcessing 
+                                ? 'bg-red-500 hover:bg-red-400 text-white' 
+                                : 'bg-gray-600 text-gray-400 cursor-not-allowed'}
+                        `}
+                    >
+                        ATTACK ({gameState.player.attack})
+                    </button>
+                    <button 
+                        disabled={gameState.turn !== 'PLAYER' || isProcessing || gameState.potions <= 0 || gameState.player.hp >= gameState.player.maxHp}
+                        onClick={() => handlePlayerAction('POTION')}
+                        className={`
+                            py-4 px-4 rounded-xl font-black text-lg shadow-[0_4px_0_rgb(0,0,0,0.3)] active:shadow-none active:translate-y-1 transition-all flex flex-col items-center justify-center leading-none min-w-[80px]
+                            ${gameState.turn === 'PLAYER' && !isProcessing && gameState.potions > 0 && gameState.player.hp < gameState.player.maxHp
+                                ? 'bg-green-600 hover:bg-green-500 text-white' 
+                                : 'bg-gray-700 text-gray-500 cursor-not-allowed opacity-70'}
+                        `}
+                        title={`Heal ${POTION_HEAL_AMOUNT} HP`}
+                    >
+                        <span>🧪</span>
+                        <span className="text-xs mt-1">x{gameState.potions}</span>
+                    </button>
+                 </div>
+                 
+                 <button 
+                    disabled={gameState.turn !== 'PLAYER' || isProcessing || gameState.player.superCharge < 100}
+                    onClick={() => handlePlayerAction('SUPER')}
+                    className={`
+                        relative py-4 px-6 rounded-xl font-black text-xl tracking-wider shadow-[0_4px_0_rgb(0,0,0,0.3)] active:shadow-none active:translate-y-1 transition-all overflow-hidden
+                        ${gameState.turn === 'PLAYER' && !isProcessing && gameState.player.superCharge >= 100
+                            ? 'bg-yellow-400 hover:bg-yellow-300 text-black' 
+                            : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+                    `}
+                 >
+                    <span className="relative z-10">SUPER!</span>
+                    {gameState.player.superCharge >= 100 && (
+                        <div className="absolute inset-0 bg-white/30 animate-pulse z-0"></div>
+                    )}
+                    {/* Charge Indicator if not full */}
+                    {gameState.player.superCharge < 100 && (
+                        <div 
+                            className="absolute left-0 bottom-0 top-0 bg-yellow-600/30 transition-all duration-300"
+                            style={{width: `${gameState.player.superCharge}%`}}
+                        ></div>
+                    )}
+                 </button>
+             </div>
+
+             {/* Game Log */}
+             <div className="flex-[2] bg-black/30 rounded-lg p-4 overflow-y-auto font-mono text-sm h-full scrollbar-hide border border-slate-600">
+                {gameState.log.map((entry) => (
+                    <div key={entry.id} className={`mb-1 ${
+                        entry.type === 'damage' ? 'text-red-400' : 
+                        entry.type === 'heal' ? 'text-green-400' : 
+                        entry.type === 'super' ? 'text-yellow-400 font-bold' : 
+                        'text-gray-300'
+                    }`}>
+                        {`> ${entry.text}`}
+                    </div>
+                ))}
+                <div ref={logsEndRef} />
+             </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderVictory = () => (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-900 text-center p-4">
+      <h1 className="text-6xl font-black text-yellow-400 mb-4 animate-bounce">VICTORY!</h1>
+      <p className="text-2xl text-white mb-6">{gameState.enemy?.name}을(를) 물리쳤습니다!</p>
+      
+      {/* Reward Display */}
+      <div className="bg-slate-800 p-6 rounded-xl border-2 border-yellow-500 mb-8 animate-pulse shadow-[0_0_30px_rgba(234,179,8,0.3)]">
+          <p className="text-gray-400 text-sm font-bold uppercase tracking-widest mb-2">Battle Reward</p>
+          <div className="flex items-center justify-center gap-3">
+               <div className="w-10 h-10 rounded-full bg-yellow-400 border-4 border-yellow-200 flex items-center justify-center shadow-inner text-yellow-800 font-black text-xl">$</div>
+               <span className="text-5xl font-black text-white">+{gameState.lastReward}</span>
+          </div>
+          <p className="mt-4 text-yellow-500 font-bold">Total: {gameState.coins.toLocaleString()} Coins</p>
+      </div>
+
+      <div className="flex gap-4">
+        <button 
+          onClick={nextLevel}
+          className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-full text-xl shadow-lg transform transition hover:scale-105"
+        >
+          다음 전투로 이동
+        </button>
+        <button 
+          onClick={goToMenu}
+          className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-8 rounded-full text-xl shadow-lg"
+        >
+          메인 메뉴
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderDefeat = () => (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-red-950 text-center p-4">
+      <h1 className="text-6xl font-black text-gray-300 mb-8">DEFEAT</h1>
+      <p className="text-2xl text-red-200 mb-8">게임 오버...</p>
+      <p className="text-xl text-white mb-8">총 승리 횟수: {gameState.wins}</p>
+      <p className="text-xl text-yellow-400 mb-8 font-bold">획득 코인: {gameState.coins}</p>
+      <button 
+          onClick={goToMenu}
+          className="bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3 px-8 rounded-full text-xl shadow-lg transform transition hover:scale-105"
+        >
+          다시 도전하기
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-white font-sans select-none">
+      {gameState.status === 'MENU' && renderMenu()}
+      {gameState.status === 'SELECT_CHARACTER' && renderCharacterSelect()}
+      {gameState.status === 'SHOP' && renderShop()}
+      {gameState.status === 'BLACKSMITH' && renderBlacksmith()}
+      {gameState.status === 'BATTLE' && renderBattle()}
+      {gameState.status === 'VICTORY' && renderVictory()}
+      {gameState.status === 'DEFEAT' && renderDefeat()}
+    </div>
+  );
+};
+
+export default App;
